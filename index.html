@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Luxeria Villa</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #111214; color: #f2f0ec; font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+    main { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
+    form { width: 100%; max-width: 340px; background: #1b1c1f; border: 1px solid #2c2e33; border-radius: 12px; padding: 28px 24px; box-shadow: 0 10px 40px rgba(0,0,0,.4); }
+    h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .02em; }
+    p { margin: 0 0 20px; color: #b9b5ae; font-size: 13px; }
+    input[type=password] { width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 8px; border: 1px solid #3a3d43; background: #121315; color: inherit; font: inherit; }
+    input[type=password]:focus { outline: 2px solid #d9b77e; border-color: transparent; }
+    small { display: block; margin-top: 14px; color: #8d8982; font-size: 12px; }
+    button { margin-top: 16px; width: 100%; padding: 11px; border: 0; border-radius: 8px; background: #d9b77e; color: #1a1408; font: 600 15px/1 inherit; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: progress; }
+    #bar { margin-top: 14px; height: 6px; border-radius: 3px; background: #2c2e33; overflow: hidden; }
+    #fill { height: 100%; width: 0; background: #d9b77e; transition: width .2s; }
+    #msg { min-height: 20px; margin-top: 12px; font-size: 13px; color: #b9b5ae; }
+    #msg.err { color: #f0a58f; }
+  </style>
+</head>
+<body>
+<main>
+  <form id="f" autocomplete="on">
+    <h1>Luxeria Villa</h1>
+    <p>3D walkthrough. Enter the password you were given.</p>
+    <input id="pw" type="password" autocomplete="current-password" placeholder="Password" required autofocus />
+    <button id="go">Open</button>
+    <div id="bar" hidden><div id="fill"></div></div>
+    <div id="msg"></div>
+    <small>This device keeps the unpacked copy. To sign out, open this page with <code>?logout</code> at the end of the address.</small>
+  </form>
+</main>
+<script>
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const msg = (t, err) => { $('msg').textContent = t; $('msg').classList.toggle('err', !!err); };
+  const go = $('go');
+  if (!('serviceWorker' in navigator) || !crypto.subtle || !window.caches || !window.DecompressionStream) {
+    msg('This browser can’t open the protected copy (it needs HTTPS and a current Safari, Chrome, Edge or Firefox, not a private window).', true);
+    go.disabled = true; return;
+  }
+  const reg = await navigator.serviceWorker.register('sw.js', { scope: './' });
+  // after a redeploy, make sure the current worker is in charge (an older one may still control this page)
+  await reg.update().catch(() => {});
+  if (reg.installing || reg.waiting) await new Promise((ok) => { navigator.serviceWorker.addEventListener('controllerchange', ok, { once: true }); setTimeout(ok, 4000); });
+  await navigator.serviceWorker.ready;
+  const meta = await (await fetch('meta.json', { cache: 'no-store' })).json();
+  const NAME = 'luxeria-' + meta.salt.replace(/[^A-Za-z0-9]/g, '');
+  const DONE = new URL('__complete__', location.href).href;
+  const params = new URLSearchParams(location.search);
+  const dropOld = async (keep) => { for (const k of await caches.keys()) if (k.startsWith('luxeria-') && k !== keep) await caches.delete(k); };
+  if (params.has('logout')) await dropOld(null);
+  else if (await caches.has(NAME) && await (await caches.open(NAME)).match(DONE)) { location.replace('app.html'); return; }
+  else { // an older build, or an unfinished unpack
+    const hadOld = (await caches.keys()).some((k) => k.startsWith('luxeria-') && k !== NAME);
+    await dropOld(null);
+    if (hadOld) msg('A new version is available. Enter the password to update this device.');
+  }
+
+  const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const TYPES = { html: 'text/html; charset=utf-8', js: 'text/javascript', css: 'text/css', json: 'application/json', gltf: 'model/gltf+json',
+    bin: 'application/octet-stream', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', hdr: 'application/octet-stream',
+    txt: 'text/plain; charset=utf-8', svg: 'image/svg+xml', woff2: 'font/woff2', ttf: 'font/ttf' };
+  const typeOf = (p) => TYPES[p.split('.').pop().toLowerCase()] ?? 'application/octet-stream';
+  const open = async (key, buf) => new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, key, buf.slice(12)));
+  const gunzip = async (bytes) => new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+
+  $('f').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    go.disabled = true; msg('Checking…');
+    try {
+      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode($('pw').value), 'PBKDF2', false, ['deriveKey']);
+      const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: b64(meta.salt), iterations: meta.iterations },
+        base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+      try { await open(key, b64(meta.check).buffer); }
+      catch { msg('Wrong password.', true); go.disabled = false; return; }
+
+      const manifest = JSON.parse(new TextDecoder().decode(await open(key, await (await fetch('pack/manifest.bin', { cache: 'no-store' })).arrayBuffer())));
+      const total = manifest.chunks.reduce((a, c) => a + c.size, 0);
+      const got = new Array(manifest.chunks.length).fill(0);
+      const bar = $('bar'), fill = $('fill');
+      bar.hidden = false;
+      const progress = () => {
+        const n = got.reduce((a, b) => a + b, 0);
+        fill.style.width = (100 * n / total).toFixed(1) + '%';
+        msg(`Downloading ${Math.round(n / 2 ** 20)} of ${Math.round(total / 2 ** 20)} MB (once per device)…`);
+      };
+      const cache = await caches.open(NAME);
+      const byChunk = manifest.chunks.map(() => []);
+      manifest.files.forEach((f) => byChunk[f[1]].push(f));
+      const fetchChunk = async (i) => {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            // ?v=<build salt>: the packs keep their names from build to build and the host lets browsers cache them for
+            // 10 minutes, so right after a redeploy a browser could pair an old pack with the new key (decrypt fails:
+            // "The operation failed for an operation-specific reason")
+            const res = await fetch('pack/' + manifest.chunks[i].name + '?v=' + encodeURIComponent(meta.salt));
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const reader = res.body.getReader(), parts = [];
+            got[i] = 0;
+            for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got[i] += value.length; progress(); }
+            return await new Blob(parts).arrayBuffer();
+          } catch (err) { if (attempt === 2) throw err; await new Promise((r) => setTimeout(r, 800 * (attempt + 1))); }
+        }
+      };
+      const unpack = async (i) => {
+        const plain = await gunzip(await open(key, await fetchChunk(i)));
+        await Promise.all(byChunk[i].map(([path, , off, len]) => cache.put(new URL(path, location.href).href,
+          new Response(plain.slice(off, off + len), { headers: { 'Content-Type': typeOf(path) } }))));
+      };
+      let next = 0;
+      await Promise.all(Array.from({ length: 4 }, async () => { while (next < manifest.chunks.length) await unpack(next++); }));
+      await cache.put(DONE, new Response('ok'));
+      msg('Opening…');
+      location.replace('app.html');
+    } catch (err) { msg('Could not open: ' + err.message, true); go.disabled = false; }
+  });
+})();
+</script>
+</body>
+</html>
